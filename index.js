@@ -5,9 +5,8 @@ const axios = require('axios');
 const path = require('path');
 const express = require('express');
 
-// Load environment variables from process.env
-// The path.resolve part is generally not needed in Vercel.
-require('dotenv').config({ path: path.resolve(__dirname, './.env') });
+// --- DELETED: require('dotenv').config({ path: path.resolve(__dirname, './.env') }); 
+// Vercel loads environment variables automatically from process.env
 
 /* ===================== CONFIG ===================== */
 
@@ -21,8 +20,8 @@ const {
 } = process.env;
 
 if (!TELEGRAM_BOT_TOKEN || !MONGODB_URI || !ADMIN_USER_ID || !VERCEL_URL) {
-    console.error('❌ Missing environment variables');
-    process.exit(1);
+    console.error('❌ Missing environment variables. Check Vercel settings.');
+    // In a live environment, process.exit(1) is usually avoided to let Vercel retry.
 }
 
 // Convert ADMIN_USER_ID to Number
@@ -38,12 +37,13 @@ mongoose.set('strictQuery', true);
 async function initMongo() {
     try {
         if (dbReady) return;
-        await mongoose.connect(MONGODB_URI);
+        // The MONGODB_URI must include the database name (e.g., /teraboxBotDB)
+        await mongoose.connect(MONGODB_URI); 
         dbReady = true;
         console.log('✅ MongoDB connected');
     } catch (error) {
+        // This log is crucial for debugging
         console.error('❌ MongoDB connection failed:', error.message);
-        // It's crucial not to exit the process here, so Vercel can retry the cold start.
     }
 }
 
@@ -95,6 +95,7 @@ function hasAccess(user) {
 /* ===================== INIT RUN ===================== */
 
 // Run MongoDB initialization only. Webhook must be set manually once.
+// This runs once during Vercel cold start.
 (async () => {
     await initMongo();
     console.log('✅ Bot Initialization Attempt Complete.');
@@ -136,7 +137,7 @@ bot.onText(/\/start/, async (msg) => {
         bot.sendMessage(chatId, '✅ **Send your Terabox link now!**', { parse_mode: 'Markdown' });
 
     } catch (e) {
-        console.error('❌ Error in /start handler:', e.message);
+        console.error('❌ Error in /start handler (DB/Logic):', e.message);
         bot.sendMessage(chatId, '❌ An internal error occurred. Please try again later.').catch(() => {});
     }
 });
@@ -262,9 +263,11 @@ app.use(express.json());
 
 // Webhook Handler: This is the URL Telegram sends updates to
 app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
+    // 1. MUST respond with 200 OK immediately to prevent Vercel timeout
+    res.sendStatus(200); 
+
+    // 2. Process the update asynchronously
     bot.processUpdate(req.body);
-    // MUST respond with 200 OK immediately
-    res.sendStatus(200);
 });
 
 // Health check endpoint
