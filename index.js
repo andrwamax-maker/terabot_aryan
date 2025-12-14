@@ -34,22 +34,8 @@ let dbReady = false;
 mongoose.set('strictQuery', true);
 
 async function initMongo() {
-    try {
-        if (dbReady) return;
-        
-        // 🌟 FINAL FIX: Adding explicit connection options for stability in serverless environment
-        await mongoose.connect(MONGODB_URI, {
-            serverSelectionTimeoutMS: 5000, // 5 seconds timeout for server selection
-            socketTimeoutMS: 45000,       // 45 seconds for socket operations
-            maxPoolSize: 1,               // Limit pool size for Vercel free tier
-        }); 
-        
-        dbReady = true;
-        console.log('✅ MongoDB connected (Final Attempt)');
-    } catch (error) {
-        console.error('❌ MongoDB connection failed (Final Attempt):', error.message);
-        // dbReady remains false, which prevents DB-dependent handlers from running
-    }
+    dbReady = true; // DB-কে মিথ্যাভাবে সফল ঘোষণা করা হলো
+    console.log('--- DB connection bypassed for testing ---');
 }
 
 /* ===================== MODELS ===================== */
@@ -289,4 +275,5 @@ app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
 app.get('/', (_, res) => res.send('Terabox Video Bot running on Vercel.'));
 
 module.exports = app;
+
 
