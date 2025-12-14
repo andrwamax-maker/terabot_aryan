@@ -48,8 +48,18 @@ async function initialize() {
     try {
         // 1. Connect to MongoDB
         await mongoose.connect(MONGODB_URI);
-        dbConnected = true; // Set flag to true on successful connection
+        dbConnected = true; 
         console.log('✅ MongoDB connected successfully.');
+
+        // 2. [DELETE OR COMMENT OUT THE setWebHook CALL HERE]
+        // const webhookUrl = `${VERCEL_URL}/bot${BOT_TOKEN}`;
+        // await bot.setWebHook(webhookUrl); 
+        // console.log(`Webhook successfully set to: ${webhookUrl}`);
+
+    } catch (error) {
+        console.error('❌ Initialization Error (DB or Webhook):', error.message);
+    }
+}
 
         // 2. Set Webhook
         const webhookUrl = `${VERCEL_URL}/bot${BOT_TOKEN}`;
@@ -408,3 +418,4 @@ app.get('/', (req, res) => {
 
 // Export the Express app for Vercel
 module.exports = app;
+
