@@ -36,13 +36,18 @@ mongoose.set('strictQuery', true);
 async function initMongo() {
     try {
         if (dbReady) return;
-        // The MONGODB_URI must include the database name (e.g., /teraboxBotDB)
-        await mongoose.connect(MONGODB_URI); 
+        
+        // 🌟 FINAL FIX: Adding explicit connection options for stability in serverless environment
+        await mongoose.connect(MONGODB_URI, {
+            serverSelectionTimeoutMS: 5000, // 5 seconds timeout for server selection
+            socketTimeoutMS: 45000,       // 45 seconds for socket operations
+            maxPoolSize: 1,               // Limit pool size for Vercel free tier
+        }); 
+        
         dbReady = true;
-        console.log('✅ MongoDB connected');
+        console.log('✅ MongoDB connected (Final Attempt)');
     } catch (error) {
-        // This log is crucial for debugging
-        console.error('❌ MongoDB connection failed:', error.message);
+        console.error('❌ MongoDB connection failed (Final Attempt):', error.message);
         // dbReady remains false, which prevents DB-dependent handlers from running
     }
 }
@@ -284,3 +289,4 @@ app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
 app.get('/', (_, res) => res.send('Terabox Video Bot running on Vercel.'));
 
 module.exports = app;
+
