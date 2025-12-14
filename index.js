@@ -5,7 +5,6 @@ const axios = require('axios');
 const path = require('path');
 const express = require('express');
 
-// --- DELETED: require('dotenv').config({ path: path.resolve(__dirname, './.env') }); 
 // Vercel loads environment variables automatically from process.env
 
 /* ===================== CONFIG ===================== */
@@ -44,6 +43,7 @@ async function initMongo() {
     } catch (error) {
         // This log is crucial for debugging
         console.error('❌ MongoDB connection failed:', error.message);
+        // dbReady remains false, which prevents DB-dependent handlers from running
     }
 }
 
@@ -105,11 +105,20 @@ function hasAccess(user) {
 
 // /start
 bot.onText(/\/start/, async (msg) => {
-    // Critical check to avoid DB operations during cold start timeout
-    if (!dbReady) return bot.sendMessage(msg.chat.id, "⚠️ Server is warming up, please try again in a few seconds.").catch(() => {});
-
     const chatId = msg.chat.id;
     const userId = msg.from.id;
+
+    // Critical check to avoid DB operations during cold start timeout
+    if (!dbReady) return bot.sendMessage(chatId, "⚠️ Server is warming up, please try again in a few seconds.").catch(() => {});
+
+    // 🌟 TEST LINE: এই লাইনটি দেখাবে যে DB রেডি হওয়ার পরে কোড চলছে
+    try {
+        await bot.sendMessage(chatId, "DB_STATUS_TEST: Passed. Attempting user data fetch...").catch(() => {});
+    } catch (e) {
+        console.error("❌ Telegram Send Failed (DB_STATUS_TEST):", e.message);
+        return;
+    }
+    // -------------------------------------------------------------
 
     try {
         const user = await getOrCreateUser(userId);
@@ -138,6 +147,7 @@ bot.onText(/\/start/, async (msg) => {
 
     } catch (e) {
         console.error('❌ Error in /start handler (DB/Logic):', e.message);
+        // Final fallback message
         bot.sendMessage(chatId, '❌ An internal error occurred. Please try again later.').catch(() => {});
     }
 });
