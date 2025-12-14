@@ -36,10 +36,18 @@ mongoose.set('strictQuery', true);
 async function initMongo() {
     try {
         if (dbReady) return;
-        // The MONGODB_URI must include the database name (e.g., /teraboxBotDB)
-        await mongoose.connect(MONGODB_URI, { /* ... options ... */ }); 
+        
+        await mongoose.connect(MONGODB_URI, {
+            // 🌟 বাড়ানো হলো: 30 সেকেন্ড অপেক্ষা
+            serverSelectionTimeoutMS: 30000, 
+            socketTimeoutMS: 45000,       
+            maxPoolSize: 1,               
+            // 🌟 নতুন যোগ করা হলো: 30 সেকেন্ড পর্যন্ত বাফারিং এরর এড়াতে
+            bufferTimeoutMS: 30000,       
+        }); 
+        
         dbReady = true;
-        console.log('✅ MongoDB connected');
+        console.log('✅ MongoDB connected (Timeout increased)');
     } catch (error) {
         console.error('❌ MongoDB connection failed:', error.message);
     }
@@ -282,6 +290,7 @@ app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
 app.get('/', (_, res) => res.send('Terabox Video Bot running on Vercel.'));
 
 module.exports = app;
+
 
 
 
