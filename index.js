@@ -3,44 +3,34 @@ const TelegramBot = require('node-telegram-bot-api');
 const mongoose = require('mongoose');
 const axios = require('axios');
 const path = require('path');
-// Node.js এর জন্য, শুধুমাত্র Webhook মোডে কাজ করার জন্য express প্রয়োজন।
-const express = require('express'); 
+const express = require('express');
 
-// .env ফাইল লোড করা
+// Load environment variables from .env file
 require('dotenv').config({ path: path.resolve(__dirname, './.env') });
 
-// --- কনফিগারেশন ---
+// --- CONFIGURATION ---
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const MONGODB_URI = process.env.MONGODB_URI;
-const ADMIN_ID = parseInt(process.env.ADMIN_USER_ID);
+// Note: Ensure ADMIN_USER_ID is set as a string of numbers in Vercel
+const ADMIN_ID = parseInt(process.env.ADMIN_USER_ID); 
 const ACCESS_API_URL = process.env.ACCESS_API_URL;
 const VIDEO_API_BASE_URL = process.env.VIDEO_API_BASE_URL;
 const VERCEL_URL = process.env.VERCEL_URL;
 
 if (!BOT_TOKEN || !MONGODB_URI || !ADMIN_ID || !VERCEL_URL) {
-    console.error("❌ ERROR: .env ফাইলে প্রয়োজনীয় ভ্যারিয়েবল (TOKEN, MONGODB_URI, ADMIN_USER_ID, VERCEL_URL) মিসিং আছে।");
-    process.exit(1);
+    console.error("❌ ERROR: Required environment variables (TOKEN, MONGODB_URI, ADMIN_USER_ID, VERCEL_URL) are missing.");
+    process.exit(1); // Exit if critical variables are missing
 }
 
-// Webhook-এর জন্য 'polling: false' ব্যবহার করা হয়েছে।
+// Use polling: false for Vercel Webhook deployment
 const bot = new TelegramBot(BOT_TOKEN, { polling: false }); 
 
-// MongoDB কানেকশন
-const connectDB = async () => {
-    try {
-        await mongoose.connect(MONGODB_URI);
-        console.log('✅ MongoDB সফলভাবে কানেক্ট হয়েছে।');
-    } catch (error) {
-        console.error('❌ MongoDB কানেকশন এরর:', error);
-    }
-};
-connectDB();
+// --- MongoDB Schemas ---
 
-// --- MongoDB স্কিমা ---
 const userSchema = new mongoose.Schema({
     userId: { type: Number, required: true, unique: true },
     isAccessGranted: { type: Boolean, default: false },
-    accessExpires: { type: Date, default: null }, // 24 ঘণ্টা পর অ্যাক্সেস এক্সপায়ার হবে
+    accessExpires: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', userSchema);
@@ -51,7 +41,30 @@ const configSchema = new mongoose.Schema({
 });
 const Config = mongoose.model('Config', configSchema);
 
-// --- হেল্পার ফাংশন ---
+// --- Initialization Function ---
+
+async function initialize() {
+    try {
+        // 1. Connect to MongoDB
+        await mongoose.connect(MONGODB_URI);
+        console.log('✅ MongoDB connected successfully.');
+
+        // 2. Set Webhook
+        const webhookUrl = `${VERCEL_URL}/bot${BOT_TOKEN}`;
+        await bot.setWebHook(webhookUrl);
+        console.log(`Webhook successfully set to: ${webhookUrl}`);
+
+    } catch (error) {
+        console.error('❌ Initialization Error (DB or Webhook):', error.message);
+        // Important: If initialization fails, log the error but allow Express to start 
+        // to avoid Vercel crash loop, which causes the 429 error.
+    }
+}
+// Run initialization once
+initialize();
+
+
+// --- Helper Functions ---
 
 async function registerUser(userId) {
     let user = await User.findOne({ userId });
@@ -67,202 +80,221 @@ function isAdmin(userId) {
 }
 
 /**
- * ভিডিও সেন্ড করার পর ২০ সেকেন্ড অপেক্ষা করে মেসেজটি ডিলিট করে দেয়।
+ * Schedules message deletion after 20 seconds. Includes error handling for Telegram API.
  */
 function scheduleMessageDeletion(chatId, messageId) {
-    const DELAY_MS = 20000; // 20 সেকেন্ড
+    const DELAY_MS = 20000;
     setTimeout(() => {
         bot.deleteMessage(chatId, messageId)
-            .catch(error => console.error(`মেসেজ ডিলিট করতে এরর:`, error.message));
+            .catch(error => {
+                if (error.response && error.response.statusCode === 429) {
+                    console.error("Rate Limit Error while deleting message.");
+                } else {
+                    console.error(`Error deleting message ${messageId}:`, error.message);
+                }
+            });
     }, DELAY_MS);
 }
 
-// --- টেলিগ্রাম বট লজিক ---
+// --- TELEGRAM BOT LOGIC ---
 
-// 1. /start কমান্ড হ্যান্ডেল
+// 1. /start command handler
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
-    const user = await registerUser(userId);
+    // Use try-catch for all Telegram calls to prevent unhandled rejections
+    try {
+        const user = await registerUser(userId);
 
-    let welcomeMessage = `**👋 স্বাগতম!**\n\nআপনি একটি Terabox ভিডিও দেখার বটের মধ্যে আছেন।\n\nঅনুগ্রহ করে আপনার **Terabox ভিডিওর লিঙ্ক** দিন।`;
+        let welcomeMessage = `**👋 Welcome!**\n\nYou are in the Terabox video bot.\n\nPlease provide your **Terabox video link**.`;
 
-    // অ্যাক্সেস যোগ করার লজিক: যখন ইউজার বাইরের লিঙ্ক থেকে /start?payload... দিয়ে আসবে
-    if (msg.text.includes('/start') && msg.text.length > 6) { // নিশ্চিত করতে যে এটি শুধু /start নয়
-        const now = new Date();
-        const expiryTime = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+        // Logic for 24-hour access via deep linking (/start payload)
+        if (msg.text.includes('/start') && msg.text.length > 6) {
+            const now = new Date();
+            const expiryTime = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-        user.isAccessGranted = true;
-        user.accessExpires = expiryTime;
-        await user.save();
+            user.isAccessGranted = true;
+            user.accessExpires = expiryTime;
+            await user.save();
 
-        welcomeMessage = `✅ **অ্যাক্সেস যোগ করা হয়েছে!**\n\nআপনার **২৪ ঘন্টার অ্যাক্সেস** শুরু হয়ে গেছে। এটি **${expiryTime.toLocaleString('bn-IN', { timeZone: 'Asia/Kolkata' })}** পর্যন্ত বৈধ।\n\nএখন আপনি Terabox ভিডিওর লিঙ্ক দিতে পারেন।`;
-    }
-    
-    const hasActiveAccess = user.isAccessGranted && user.accessExpires > new Date();
+            welcomeMessage = `✅ **Access Added!**\n\nYour **24 hours access** has started. It is valid until **${expiryTime.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })}**.\n\nYou can now send your Terabox video link.`;
+        }
+        
+        const hasActiveAccess = user.isAccessGranted && user.accessExpires > new Date();
 
-    if (!hasActiveAccess) {
-        const keyboard = {
-            inline_keyboard: [
-                [{ text: "⏰ Get 24 Hours Access", callback_data: "get_access" }],
-                [{ text: "▶️ Access Tutorial Video", callback_data: "tutorial_video" }]
-            ]
-        };
-        welcomeMessage += `\n\n⚠️ **Insufficient Balance**। অ্যাক্সেস পেতে নিচের বাটন ব্যবহার করুন।`;
+        if (!hasActiveAccess) {
+            const keyboard = {
+                inline_keyboard: [
+                    [{ text: "⏰ Get 24 Hours Access", callback_data: "get_access" }],
+                    [{ text: "▶️ Access Tutorial Video", callback_data: "tutorial_video" }]
+                ]
+            };
+            welcomeMessage += `\n\n⚠️ **Insufficient Balance**. Use the buttons below to get access.`;
 
-        bot.sendMessage(chatId, welcomeMessage, {
-            parse_mode: 'Markdown',
-            reply_markup: keyboard
-        });
-    } else {
-        bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
+            await bot.sendMessage(chatId, welcomeMessage, {
+                parse_mode: 'Markdown',
+                reply_markup: keyboard
+            });
+        } else {
+            await bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
+        }
+    } catch (e) {
+        console.error("Error in /start handler:", e.message);
     }
 });
 
-// 2. Inline Keyboard (বাটন ক্লিক) হ্যান্ডেল
+// 2. Inline Keyboard (Button Click) Handler
 bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const data = query.data;
 
     await bot.answerCallbackQuery(query.id); 
 
-    if (data === 'get_access') {
-        // "get 24 hours access"
-        try {
+    try {
+        if (data === 'get_access') {
+            // "Get 24 Hours Access"
             const response = await axios.get(ACCESS_API_URL);
             const accessLink = response.data.trim(); 
             
             await bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
 
-            const message = `🔗 **আপনার অ্যাক্সেস লিঙ্ক:**\n\nএই লিঙ্কটিতে ক্লিক করে **'START'** করুন। আপনার ২৪ ঘন্টার অ্যাক্সেস অ্যাক্টিভেট হয়ে যাবে।\n\n${accessLink}`;
+            const message = `🔗 **Your Access Link:**\n\nClick this link and press **'START'**. Your 24-hour access will be activated.\n\n${accessLink}`;
             
-            bot.sendMessage(chatId, message, {
+            await bot.sendMessage(chatId, message, {
                 parse_mode: 'Markdown',
                 disable_web_page_preview: true
             });
 
-        } catch (error) {
-            console.error("Access API কল এরর:", error.message);
-            bot.sendMessage(chatId, "দুঃখিত, অ্যাক্সেস লিঙ্ক আনতে সমস্যা হচ্ছে।");
-        }
-    } else if (data === 'tutorial_video') {
-        // "Access tutorial video"
-        const config = await Config.findOne({ key: 'tutorial_video_file_id' });
+        } else if (data === 'tutorial_video') {
+            // "Access Tutorial Video"
+            const config = await Config.findOne({ key: 'tutorial_video_file_id' });
 
-        if (config && config.value) {
-            bot.sendVideo(chatId, config.value, { 
-                caption: "ভিডিওটি কীভাবে ব্যবহার করবেন তা এই টিউটোরিয়ালে দেখানো হয়েছে।" 
-            });
-        } else {
-            bot.sendMessage(chatId, "😥 দুঃখিত, অ্যাডমিন এখনও টিউটোরিয়াল ভিডিও সেট করেনি।");
+            if (config && config.value) {
+                await bot.sendVideo(chatId, config.value, { 
+                    caption: "This tutorial shows you how to use the service." 
+                });
+            } else {
+                await bot.sendMessage(chatId, "😥 Sorry, the admin has not set the tutorial video yet.");
+            }
         }
+    } catch (e) {
+        console.error("Error in callback query handler:", e.message);
+        // Avoid sending generic error messages on every crash to prevent 429
     }
 });
 
-// 3. Terabox লিঙ্ক হ্যান্ডেল (ভিডিও ডাউনলোড)
+// 3. Terabox Link Handler (Video Download)
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
     const text = msg.text;
     
-    // কমান্ড হলে বা ভিডিও লিঙ্ক না হলে ইগনোর
+    // Ignore commands or non-link messages
     if (text.startsWith('/') || !/(terabox|4funbox)\.com/.test(text)) {
         return;
     }
 
-    const user = await User.findOne({ userId });
-    const hasActiveAccess = user && user.isAccessGranted && user.accessExpires > new Date();
+    try {
+        const user = await User.findOne({ userId });
+        const hasActiveAccess = user && user.isAccessGranted && user.accessExpires > new Date();
 
-    if (hasActiveAccess) {
-        // --- ইউজার এর অ্যাক্সেস আছে: ভিডিও ফেচ এবং সেন্ড করা ---
-        
-        const loadingMsg = await bot.sendMessage(chatId, "⏳ **ভিডিও প্রসেস করা হচ্ছে...** অনুগ্রহ করে অপেক্ষা করুন।", { parse_mode: 'Markdown' });
+        if (hasActiveAccess) {
+            // --- User HAS Access: Fetch and send video ---
+            
+            const loadingMsg = await bot.sendMessage(chatId, "⏳ **Processing video...** Please wait.", { parse_mode: 'Markdown' });
 
-        try {
-            const apiUrl = `${VIDEO_API_BASE_URL}${encodeURIComponent(text)}`;
-            const response = await axios.get(apiUrl);
-            const videoData = response.data;
+            try {
+                const apiUrl = `${VIDEO_API_BASE_URL}${encodeURIComponent(text)}`;
+                const response = await axios.get(apiUrl);
+                const videoData = response.data;
 
-            if (videoData.status === 'success' && videoData.media_url) {
-                
-                const captionText = `**${videoData.title}**\n\n---
+                if (videoData.status === 'success' && videoData.media_url) {
+                    
+                    const captionText = `**${videoData.title}**\n\n---
 ⚠️ **Video ko forward karke save kar lo. 20 second me delete ho jayega.**`;
 
-                // Play এবং Download বাটন সহ ভিডিও পাঠানো
-                const sentMessage = await bot.sendVideo(chatId, videoData.media_url, {
-                    caption: captionText,
-                    parse_mode: 'Markdown',
-                    supports_streaming: true,
-                    reply_markup: {
-                         inline_keyboard: [
-                             [{ text: "▶️ Play Now", url: videoData.media_url }],
-                             [{ text: "📥 Download", url: videoData.media_url }]
-                         ]
-                    }
-                });
+                    // Send video with Play and Download buttons
+                    const sentMessage = await bot.sendVideo(chatId, videoData.media_url, {
+                        caption: captionText,
+                        parse_mode: 'Markdown',
+                        supports_streaming: true,
+                        reply_markup: {
+                             inline_keyboard: [
+                                 [{ text: "▶️ Play Now", url: videoData.media_url }],
+                                 [{ text: "📥 Download", url: videoData.media_url }]
+                             ]
+                        }
+                    });
 
-                // ২০ সেকেন্ড পর ভিডিও ডিলিট করা
-                scheduleMessageDeletion(chatId, sentMessage.message_id);
+                    // Schedule video deletion after 20 seconds
+                    scheduleMessageDeletion(chatId, sentMessage.message_id);
 
-            } else {
-                bot.sendMessage(chatId, "😥 দুঃখিত, এই লিঙ্ক থেকে ভিডিওটি ডাউনলোড করা যাচ্ছে না। API Error.");
+                } else {
+                    await bot.sendMessage(chatId, "😥 Sorry, cannot download the video from this link. API Error.");
+                }
+
+            } catch (error) {
+                console.error("Video Fetch API Call Error:", error.message);
+                await bot.sendMessage(chatId, "⚠️ Error fetching data from the video server.");
+            } finally {
+                // Delete loading message
+                await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => {});
             }
 
-        } catch (error) {
-            console.error("Video Fetch API কল এরর:", error.message);
-            bot.sendMessage(chatId, "⚠️ ভিডিও সার্ভার থেকে ডেটা আনতে সমস্যা হয়েছে।");
-        } finally {
-            // লোডিং মেসেজ ডিলিট করা
-            await bot.deleteMessage(chatId, loadingMsg.message_id).catch(() => {});
+        } else {
+            // Access is missing
+            const keyboard = {
+                inline_keyboard: [
+                    [{ text: "⏰ Get 24 Hours Access", callback_data: "get_access" }],
+                    [{ text: "▶️ Access Tutorial Video", callback_data: "tutorial_video" }]
+                ]
+            };
+            await bot.sendMessage(chatId, "⚠️ **Insufficient Balance**. Please get access:", {
+                parse_mode: 'Markdown',
+                reply_markup: keyboard
+            });
         }
-
-    } else {
-        // অ্যাক্সেস নেই, তাই আবার বাটন দেখানো
-        const keyboard = {
-            inline_keyboard: [
-                [{ text: "⏰ Get 24 Hours Access", callback_data: "get_access" }],
-                [{ text: "▶️ Access Tutorial Video", callback_data: "tutorial_video" }]
-            ]
-        };
-        bot.sendMessage(chatId, "⚠️ **Insufficient Balance**। অনুগ্রহ করে অ্যাক্সেস নিন:", {
-            parse_mode: 'Markdown',
-            reply_markup: keyboard
-        });
+    } catch (e) {
+        console.error("Error in message handler:", e.message);
     }
 });
 
 
-// --- অ্যাডমিন ফাংশন ---
+// --- ADMIN FUNCTIONS ---
 
 // /setvideo
 bot.onText(/\/setvideo/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
-    if (!isAdmin(userId)) return bot.sendMessage(chatId, "❌ আপনি অ্যাডমিন নন।");
+    if (!isAdmin(userId)) return bot.sendMessage(chatId, "❌ You are not an admin.");
 
-    const prompt = await bot.sendMessage(chatId, "🔗 এখন আপনি যে ভিডিওটি পাঠাবেন, সেটি টিউটোরিয়াল ভিডিও হিসেবে সেট হয়ে যাবে।");
-    
-    // ভিডিও মেসেজ আসার জন্য অপেক্ষা
-    const listener = bot.on('video', async (videoMsg) => {
-        if (videoMsg.from.id === userId) {
-            const fileId = videoMsg.video.file_id;
-            
-            // ডেটাবেসে file_id সেভ করা
-            await Config.findOneAndUpdate(
-                { key: 'tutorial_video_file_id' },
-                { value: fileId },
-                { upsert: true, new: true }
-            );
+    try {
+        const prompt = await bot.sendMessage(chatId, "🔗 Please send the video you want to set as the tutorial video now.");
+        
+        // Wait for the next video message from this user
+        const listener = bot.on('video', async (videoMsg) => {
+            if (videoMsg.from.id === userId) {
+                const fileId = videoMsg.video.file_id;
+                
+                // Save file_id to the database
+                await Config.findOneAndUpdate(
+                    { key: 'tutorial_video_file_id' },
+                    { value: fileId },
+                    { upsert: true, new: true }
+                );
 
-            bot.sendMessage(chatId, `✅ টিউটোরিয়াল ভিডিও সফলভাবে সেট করা হয়েছে।`, { reply_to_message_id: videoMsg.message_id });
+                await bot.sendMessage(chatId, `✅ Tutorial video successfully set.`, { reply_to_message_id: videoMsg.message_id });
 
-            // লিসেনার বন্ধ করা
-            bot.removeListener('video', listener);
-            bot.deleteMessage(chatId, prompt.message_id).catch(() => {});
-        }
-    });
+                // Remove the listener to avoid memory leaks
+                bot.removeListener('video', listener);
+                await bot.deleteMessage(chatId, prompt.message_id).catch(() => {});
+            }
+        });
+    } catch (e) {
+        console.error("Error in /setvideo handler:", e.message);
+    }
 });
 
 // /usercount
@@ -270,7 +302,7 @@ bot.onText(/\/usercount/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
-    if (!isAdmin(userId)) return bot.sendMessage(chatId, "❌ আপনি অ্যাডমিন নন।");
+    if (!isAdmin(userId)) return bot.sendMessage(chatId, "❌ You are not an admin.");
 
     try {
         const totalUsers = await User.countDocuments({});
@@ -279,9 +311,10 @@ bot.onText(/\/usercount/, async (msg) => {
             accessExpires: { $gt: new Date() } 
         });
         
-        bot.sendMessage(chatId, `📊 **ইউজার স্ট্যাটাস:**\n\n* মোট ইউজার: **${totalUsers}** জন।\n* অ্যাক্টিভ অ্যাক্সেস: **${activeUsers}** জন।`, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, `📊 **User Status:**\n\n* Total Users: **${totalUsers}**\n* Active Access: **${activeUsers}**`, { parse_mode: 'Markdown' });
     } catch (error) {
-        bot.sendMessage(chatId, "❌ ইউজার ডেটা আনতে সমস্যা হয়েছে।");
+        console.error("Error fetching user count:", error.message);
+        await bot.sendMessage(chatId, "❌ Error retrieving user data.");
     }
 });
 
@@ -290,7 +323,7 @@ bot.onText(/\/broadcast (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
     
-    if (!isAdmin(userId)) return bot.sendMessage(chatId, "❌ আপনি অ্যাডমিন নন।");
+    if (!isAdmin(userId)) return bot.sendMessage(chatId, "❌ You are not an admin.");
 
     const broadcastMessage = match[1];
     
@@ -300,43 +333,42 @@ bot.onText(/\/broadcast (.+)/, async (msg, match) => {
         
         for (const user of users) {
             try {
+                // Sending message to each user
                 await bot.sendMessage(user.userId, broadcastMessage, { parse_mode: 'Markdown' });
                 successCount++;
             } catch (e) {
-                // ব্লক করা ইউজারকে ইগনোর করা
+                // Ignore users who have blocked the bot
             }
         }
         
-        bot.sendMessage(chatId, `✅ সফলভাবে **${successCount}** জন ইউজারকে মেসেজ পাঠানো হয়েছে।`);
+        await bot.sendMessage(chatId, `✅ Successfully sent message to **${successCount}** users.`);
 
     } catch (error) {
-        bot.sendMessage(chatId, "❌ ব্রডকাস্ট করার সময় এরর হয়েছে।");
+        console.error("Error in broadcast:", error.message);
+        await bot.sendMessage(chatId, "❌ An error occurred during broadcasting.");
     }
 });
 
 
-// --- Vercel Webhook সেটআপ (Express.js ব্যবহার করে) ---
+// --- Vercel Webhook Setup (Using Express.js) ---
 
 const app = express();
 
-// Telegram বডি রিকোয়েস্ট পার্স করার জন্য মিডলওয়্যার
+// Middleware to parse Telegram body requests
 app.use(express.json());
 
-// Webhook URL সেট করা
-const webhookUrl = `${VERCEL_URL}/bot${BOT_TOKEN}`;
-bot.setWebHook(webhookUrl);
-
-// Webhook হ্যান্ডেলার
+// Webhook Handler
 app.post(`/bot${BOT_TOKEN}`, (req, res) => {
+    // Process the incoming update from Telegram
     bot.processUpdate(req.body);
+    // Respond quickly to Telegram to acknowledge the update
     res.sendStatus(200);
 });
 
-// রুট রাউট (স্বাগতম মেসেজ বা শুধু সার্ভার চলছে কিনা চেক করার জন্য)
+// Root route (for health check)
 app.get('/', (req, res) => {
     res.send('Terabox Video Bot is running via Webhook.');
 });
 
-// Vercel-এ এটি স্বয়ংক্রিয়ভাবে সার্ভার লিসেন করবে, তাই এখানে explicit app.listen() প্রয়োজন নেই।
-// module.exports ব্যবহার করে Vercel হ্যান্ডেল করার জন্য
+// Export the Express app for Vercel
 module.exports = app;
