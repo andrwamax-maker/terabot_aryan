@@ -1,0 +1,16 @@
+{
+  "name": "terabox-bot-project",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^X.X.X", 
+    "dotenv": "^X.X.X",
+    "express": "^X.X.X",
+    "mongoose": "^X.X.X",
+    "node-telegram-bot-api": "^X.X.X"
+  }
+}
