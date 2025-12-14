@@ -11,6 +11,7 @@ require('dotenv').config({ path: path.resolve(__dirname, './.env') });
 // --- CONFIGURATION ---
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const MONGODB_URI = process.env.MONGODB_URI;
+// Ensure ADMIN_USER_ID is set as a number (without quotes) in Vercel
 const ADMIN_ID = parseInt(process.env.ADMIN_USER_ID); 
 const ACCESS_API_URL = process.env.ACCESS_API_URL;
 const VIDEO_API_BASE_URL = process.env.VIDEO_API_BASE_URL;
@@ -51,24 +52,9 @@ async function initialize() {
         dbConnected = true; 
         console.log('✅ MongoDB connected successfully.');
 
-        // 2. [DELETE OR COMMENT OUT THE setWebHook CALL HERE]
-        // const webhookUrl = `${VERCEL_URL}/bot${BOT_TOKEN}`;
-        // await bot.setWebHook(webhookUrl); 
-        // console.log(`Webhook successfully set to: ${webhookUrl}`);
-
-    } catch (error) {
-        console.error('❌ Initialization Error (DB or Webhook):', error.message);
-    }
-}
-
-        // 2. Set Webhook
-        const webhookUrl = `${VERCEL_URL}/bot${BOT_TOKEN}`;
-        await bot.setWebHook(webhookUrl);
-        console.log(`Webhook successfully set to: ${webhookUrl}`);
-
     } catch (error) {
         // If initialization fails (e.g., DB connection error), log it but allow Express to start
-        console.error('❌ Initialization Error (DB or Webhook):', error.message);
+        console.error('❌ Initialization Error (DB):', error.message);
     }
 }
 // Run initialization once when the function starts (cold start)
@@ -98,7 +84,7 @@ function scheduleMessageDeletion(chatId, messageId) {
     setTimeout(() => {
         bot.deleteMessage(chatId, messageId)
             .catch(error => {
-                // Handle deletion errors gracefully (e.g., message already deleted or 429)
+                // Handle deletion errors gracefully
                 if (error.response && error.response.statusCode !== 400) { 
                     console.error(`Error deleting message ${messageId}:`, error.message);
                 }
@@ -144,7 +130,7 @@ bot.onText(/\/start/, async (msg) => {
                 user.accessExpires = expiryTime;
                 await user.save();
 
-                welcomeMessage = `✅ **অ্যাক্সেস যোগ করা হয়েছে! Access Added!**\n\nYour **24 hours access** has started. It is valid until **${expiryTime.toLocaleString('bn-IN', { timeZone: 'Asia/Kolkata' })}**.\n\nNow you can send your Terabox video link.`;
+                welcomeMessage = `✅ **অ্যাক্সেস যোগ করা হয়েছে! Access Added!**\n\nYour **24 hours access** has started. It is valid until **${expiryTime.toLocaleString('bn-IN', { timeZone: 'Asia/Kolkata' })}**.\n\nNow you can send your Terabox video link.`;
             }
             
             const hasActiveAccess = user.isAccessGranted && user.accessExpires > new Date();
@@ -418,4 +404,3 @@ app.get('/', (req, res) => {
 
 // Export the Express app for Vercel
 module.exports = app;
-
