@@ -34,8 +34,15 @@ let dbReady = false;
 mongoose.set('strictQuery', true);
 
 async function initMongo() {
-    dbReady = true; // DB-কে মিথ্যাভাবে সফল ঘোষণা করা হলো
-    console.log('--- DB connection bypassed for testing ---');
+    try {
+        if (dbReady) return;
+        // The MONGODB_URI must include the database name (e.g., /teraboxBotDB)
+        await mongoose.connect(MONGODB_URI, { /* ... options ... */ }); 
+        dbReady = true;
+        console.log('✅ MongoDB connected');
+    } catch (error) {
+        console.error('❌ MongoDB connection failed:', error.message);
+    }
 }
 
 /* ===================== MODELS ===================== */
@@ -275,5 +282,6 @@ app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
 app.get('/', (_, res) => res.send('Terabox Video Bot running on Vercel.'));
 
 module.exports = app;
+
 
 
