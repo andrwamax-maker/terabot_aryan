@@ -20,38 +20,54 @@ const {
 
 if (!TELEGRAM_BOT_TOKEN || !MONGODB_URI || !ADMIN_USER_ID || !VERCEL_URL) {
     console.error('❌ Missing environment variables. Check Vercel settings.');
-    // In a live environment, process.exit(1) is usually avoided to let Vercel retry.
 }
 
 // Convert ADMIN_USER_ID to Number
 const ADMIN_ID = Number(ADMIN_USER_ID); 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
 
-/* ===================== DB ===================== */
+/* ===================== DB (CONNECTION CACHING) ===================== */
 
-let dbReady = false;
+// Use global cache to reuse the connection across Vercel cold starts
+let cached = global.mongoose;
 
-mongoose.set('strictQuery', true);
+if (!cached) {
+    cached = global.mongoose = { conn: null, promise: null };
+}
 
 async function initMongo() {
-    try {
-        if (dbReady) return;
-        
-        await mongoose.connect(MONGODB_URI, {
-            // 🌟 বাড়ানো হলো: 30 সেকেন্ড অপেক্ষা
+    // 1. If connection is already cached, return it immediately
+    if (cached.conn) return cached.conn;
+
+    // 2. If a connection promise is not running, start a new one
+    if (!cached.promise) {
+        cached.promise = mongoose.connect(MONGODB_URI, {
+            // Increased timeouts for M0 Free Tier stability
             serverSelectionTimeoutMS: 30000, 
             socketTimeoutMS: 45000,       
-            maxPoolSize: 1,               
-            // 🌟 নতুন যোগ করা হলো: 30 সেকেন্ড পর্যন্ত বাফারিং এরর এড়াতে
-            bufferTimeoutMS: 30000,       
-        }); 
-        
-        dbReady = true;
-        console.log('✅ MongoDB connected (Timeout increased)');
-    } catch (error) {
-        console.error('❌ MongoDB connection failed:', error.message);
+            maxPoolSize: 1,
+            bufferTimeoutMS: 30000,
+        }).then(m => {
+            console.log('✅ MongoDB connected (Cached)');
+            return m;
+        }).catch(e => {
+            console.error('❌ MongoDB connection failed (Cached):', e.message);
+            // Must re-throw the error so handlers can catch it
+            throw e;
+        });
+    }
+
+    // 3. Wait for the connection to resolve
+    try {
+        cached.conn = await cached.promise;
+        return cached.conn;
+    } catch (e) {
+        // If connection fails, reset the promise to allow retries on next request
+        cached.promise = null;
+        throw e;
     }
 }
+
 
 /* ===================== MODELS ===================== */
 
@@ -78,6 +94,8 @@ const Config = mongoose.model(
 const isAdmin = (id) => id === ADMIN_ID;
 
 async function getOrCreateUser(userId) {
+    // 🌟 Ensure connection is established before DB operation
+    await initMongo(); 
     // This finds the user or creates a new one (safe and robust)
     return User.findOneAndUpdate(
         { userId },
@@ -88,24 +106,19 @@ async function getOrCreateUser(userId) {
 
 function scheduleDelete(chatId, messageId, delay = 20000) {
     setTimeout(() => {
-        // Use a simple catch-all for potential Telegram errors during deletion
         bot.deleteMessage(chatId, messageId).catch(() => {});
     }, delay);
 }
 
 function hasAccess(user) {
-    // Check if access is granted and the expiry time is in the future
     return user?.isAccessGranted && user.accessExpires > new Date();
 }
 
 /* ===================== INIT RUN ===================== */
 
-// Run MongoDB initialization only. Webhook must be set manually once.
-// This runs once during Vercel cold start.
-(async () => {
-    await initMongo();
-    console.log('✅ Bot Initialization Attempt Complete.');
-})();
+// Removed initMongo() call here. Connection will be established on first DB operation.
+console.log('✅ Bot Initialization Attempt Complete.');
+
 
 /* ===================== BOT LOGIC ===================== */
 
@@ -113,21 +126,12 @@ function hasAccess(user) {
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
-
-    // Critical check to avoid DB operations during cold start timeout
-    if (!dbReady) return bot.sendMessage(chatId, "⚠️ Server is warming up, please try again in a few seconds.").catch(() => {});
-
-    // 🌟 TEST LINE: এই লাইনটি দেখাবে যে DB রেডি হওয়ার পরে কোড চলছে
+    
+    // ❌ Removed old dbReady check. Try/Catch now handles connection status.
+    
     try {
-        await bot.sendMessage(chatId, "DB_STATUS_TEST: Passed. Attempting user data fetch...").catch(() => {});
-    } catch (e) {
-        console.error("❌ Telegram Send Failed (DB_STATUS_TEST):", e.message);
-        return;
-    }
-    // -------------------------------------------------------------
-
-    try {
-        const user = await getOrCreateUser(userId);
+        // This implicitly calls initMongo()
+        const user = await getOrCreateUser(userId); 
 
         // Deep-linking logic: checks if the command has a payload (e.g., /start access_key)
         if (msg.text.split(' ').length > 1) {
@@ -152,17 +156,16 @@ bot.onText(/\/start/, async (msg) => {
         bot.sendMessage(chatId, '✅ **Send your Terabox link now!**', { parse_mode: 'Markdown' });
 
     } catch (e) {
+        // This catches the 30-second connection timeout and DB errors
         console.error('❌ Error in /start handler (DB/Logic):', e.message);
-        // Final fallback message
         bot.sendMessage(chatId, '❌ An internal error occurred. Please try again later.').catch(() => {});
     }
 });
 
 // Callback buttons
 bot.on('callback_query', async (q) => {
-    // Critical check for cold start
-    if (!dbReady) return bot.answerCallbackQuery(q.id, { text: "Server not ready." });
-
+    // 🌟 Handler now relies on DB call (e.g., Config.findOne) to handle connection
+    
     const chatId = q.message.chat.id;
     await bot.answerCallbackQuery(q.id);
 
@@ -173,6 +176,8 @@ bot.on('callback_query', async (q) => {
         }
 
         if (q.data === 'tutorial_video') {
+            // 🌟 Ensure connection is established before DB operation
+            await initMongo();
             const cfg = await Config.findOne({ key: 'tutorial_video_file_id' });
             if (!cfg) return bot.sendMessage(chatId, '❌ No tutorial video has been set by the admin yet.');
             return bot.sendVideo(chatId, cfg.value);
@@ -185,9 +190,6 @@ bot.on('callback_query', async (q) => {
 
 // Video link handler
 bot.on('message', async (msg) => {
-    // Critical check for cold start
-    if (!dbReady) return bot.sendMessage(msg.chat.id, "⚠️ Server is busy, please wait.").catch(() => {});
-
     // Ignore commands or messages without text
     if (!msg.text || msg.text.startsWith('/')) return;
     // Check if the message contains a Terabox link
@@ -196,12 +198,15 @@ bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
 
     try {
+        // 🌟 Ensure connection is established before DB operation
+        await initMongo();
         const user = await User.findOne({ userId: msg.from.id });
 
         if (!hasAccess(user)) {
             return bot.sendMessage(chatId, '⚠️ Access required. Please use /start to get access.', { parse_mode: 'Markdown' });
         }
-
+        
+        // ... rest of the video link logic
         const loading = await bot.sendMessage(chatId, '⏳ Processing video... Please wait.', { parse_mode: 'Markdown' });
 
         try {
@@ -226,13 +231,20 @@ bot.on('message', async (msg) => {
         }
     } catch (e) {
         console.error('❌ Error in message handler:', e.message);
+        bot.sendMessage(chatId, '❌ An internal error occurred. Please try again later.').catch(() => {});
     }
 });
 
 // /setvideo (Admin)
 bot.onText(/\/setvideo/, async (msg) => {
-    if (!dbReady) return bot.sendMessage(msg.chat.id, "⚠️ Server is busy, try again shortly.");
     if (!isAdmin(msg.from.id)) return;
+    
+    // 🌟 Ensure connection is established before DB operation
+    try {
+        await initMongo(); 
+    } catch(e) {
+        return bot.sendMessage(msg.chat.id, "⚠️ DB Connection Failed. Cannot proceed.");
+    }
 
     bot.sendMessage(msg.chat.id, 'Send the tutorial video now.');
 
@@ -252,10 +264,12 @@ bot.onText(/\/setvideo/, async (msg) => {
 
 // /usercount (Admin)
 bot.onText(/\/usercount/, async (msg) => {
-    if (!dbReady) return bot.sendMessage(msg.chat.id, "⚠️ Server is busy, try again shortly.");
     if (!isAdmin(msg.from.id)) return;
 
     try {
+        // 🌟 Ensure connection is established before DB operation
+        await initMongo();
+        
         const total = await User.countDocuments();
         const active = await User.countDocuments({
             isAccessGranted: true,
@@ -290,7 +304,3 @@ app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
 app.get('/', (_, res) => res.send('Terabox Video Bot running on Vercel.'));
 
 module.exports = app;
-
-
-
-
